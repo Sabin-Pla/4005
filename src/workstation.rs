@@ -1,4 +1,4 @@
-
+use std::fmt::{Display, Formatter, Result};
 use std::collections::VecDeque;
 
 use crate::component::Component;
@@ -11,11 +11,58 @@ use crate::event::EnqueueResult;
 
 type Buffer = [Option<Component>; 2];
 
-#[derive(Copy, Clone, Debug)]
+impl Display for Type {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        let print_buffer = |buf: &Buffer| {
+            if let Some(component) = buf[1] {
+                return format!("[{}, {}]", buf[0].unwrap(), component);
+            } else if let Some(component) = buf[0] {
+                return format!("[{}]", component);
+            }
+            format!("[]")
+        };
+        match self {
+            Self::W1(buf) => write!(f, "{}", print_buffer(buf)),
+            Self::W2(buf1, buf2) => write!(f, "{} {}", print_buffer(buf1), print_buffer(buf2)),
+            Self::W3(buf1, buf2) => write!(f, "{} {}", print_buffer(buf1), print_buffer(buf2))
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub enum Type {
     W1(Buffer), // P1
     W2(Buffer, Buffer), // P2
     W3(Buffer, Buffer) // P3
+}
+
+impl PartialEq<Type> for Type {
+    fn eq(&self, other: &Type) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+}
+
+impl Type {
+    pub fn can_work(&self) -> bool {
+        match self {
+            Self::W1(buf) => matches!(buf[0], Some(_)),
+            Self::W2(buf1, buf2) => 
+                matches!(buf1[0], Some(_)) && matches!(buf2[0], Some(_)),
+            Self::W3(buf1, buf2) =>
+                matches!(buf1[0], Some(_)) && matches!(buf2[0], Some(_))
+        }
+    }
+
+    pub fn contains(&self, component: Component) -> bool {
+        let in_buf = |buf: &Buffer, component: Component| -> bool{
+            buf[0] == Some(component) || buf[1] == Some(component)
+        };
+        match self {
+            Self::W1(buf) => in_buf(buf, component),
+            Self::W2(buf1, buf2) => in_buf(buf1, component) || in_buf(buf2, component),
+            Self::W3(buf1, buf2) => in_buf(buf1, component) || in_buf(buf2, component)
+        }
+    } 
 }
 
 #[derive(Clone, Debug)]
@@ -23,6 +70,12 @@ pub struct Workstation {
     assembly_durations: VecDeque<Duration>,
     current_duration: Option<(TimeStamp, Duration)>, // (start time, duration)
     ws_type: Type,
+}
+
+impl Display for Workstation {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(f, "{} {}", self.name(), self.ws_type)
+    }
 }
 
 impl Workstation {
@@ -53,19 +106,9 @@ impl Workstation {
         })
     }
 
-    pub fn can_work(&self) -> bool {
-        match self.ws_type {
-            Type::W1(buf) => matches!(buf[0], None),
-            Type::W2(buf1, buf2) => 
-                !(matches!(buf1[0], None)  && matches!(buf2[0], None)),
-            Type::W3(buf1, buf2) =>
-                !(matches!(buf1[0], None)  && matches!(buf2[0], None))
-        }
-    }
-
     fn assemble(&mut self, timestamp: TimeStamp) -> Product {
         // consumes Components in buffer to create Product
-        assert!(self.can_work(), "assemble called but WS could not work");
+        assert!(self.ws_type.can_work(), "assemble called but WS could not work");
 
         let take_first_avail = |buf: &mut Buffer| -> Component {
             match buf[1] {
@@ -112,19 +155,18 @@ impl Workstation {
 
     pub fn enqueue(&mut self, ins1: bool, 
             c: Component, now: TimeStamp) -> EnqueueResult {
+
         let add_to_buffer = |buf: &mut Buffer, c| {
             // put c in next available slot in buffer 
-
             // buffer cannot be full
             if !buf[1].is_none() {
-                return EnqueueResult::Fail
+                return false;
             }
-
             match buf[0] {
                 Some(_) => buf[1] = Some(c),
                 None => buf[0] = Some(c)
             };
-            EnqueueResult::CouldEnqueue(ins1, c, self.ws_type, now)
+            true
         };
 
         let decide_buffer = |buf_c1: &mut  Buffer, other_buffer: &mut  Buffer, c| {
@@ -135,10 +177,14 @@ impl Workstation {
             }
         };
 
-        match self.ws_type {
-            Type::W1(mut buf_c1) => add_to_buffer(&mut buf_c1, c),
-            Type::W2(mut buf_c1, mut buf_c2) => decide_buffer(&mut buf_c1, &mut buf_c2, c),
-            Type::W3(mut buf_c1, mut buf_c3) => decide_buffer(&mut buf_c1, &mut buf_c3, c),
+        let result = match &mut self.ws_type {
+            Type::W1(buf_c1) => add_to_buffer(buf_c1, c),
+            Type::W2(buf_c1, buf_c2) => decide_buffer(buf_c1, buf_c2, c),
+            Type::W3(buf_c1, buf_c3) => decide_buffer(buf_c1, buf_c3, c),
+        };
+        match result {
+            true => EnqueueResult::CouldEnqueue(ins1, c, self.ws_type, now),
+            false => EnqueueResult::Fail
         }
     }
 }
@@ -148,7 +194,8 @@ impl SimulationActor for Workstation {
     fn respond_to(&mut self, event: FacilityEvent) -> Vec<FacilityEvent> {
         match event {
             FacilityEvent::WorkstationStarted(ws, start_time) => {
-                if matches!(&self, ws) {
+                if &self.ws_type == &ws {
+                    println!("{} was started {}", self.name(), ws);
                     assert!(matches!(self.current_duration, None),
                         "WS {} which is already working was started", self.name());
                     let duration = self.assembly_durations

@@ -1,6 +1,7 @@
 use std::cell::{RefCell};
 use std::rc::Rc;
 use std::collections::VecDeque;
+use std::fmt::{Display, Result, Formatter};
 
 mod product;
 mod workstation;
@@ -23,7 +24,6 @@ use product::Product;
 use event::FacilityEvent::*;
 use random::Random;
 
-
 enum Actor<'a> {
     Ptr(&'a mut dyn Inspector),
     Val(Rc<RefCell<Workstation>>)
@@ -44,20 +44,30 @@ impl<'a> Actor<'a> {
             Actor::Val(v) => v.borrow_mut().respond_to(event)
         }
     }
+    
     fn respond(&mut self, now: TimeStamp, time_passed: Duration) -> Vec<FacilityEvent> {
         match self {
             Actor::Ptr(p) => (p as &mut dyn SimulationActor).respond(now, time_passed),
             Actor::Val(v) => v.borrow_mut().respond(now, time_passed)
         }
     }
+    
     fn duration_until_next_event(&self, now: TimeStamp) -> Option<Duration> {
         match self {
             Actor::Ptr(p) => (p as &dyn SimulationActor).duration_until_next_event(now),
             Actor::Val(v) => v.borrow_mut().duration_until_next_event(now)
         }
     }
-
 }
+
+impl<'a> Display for Actor<'a>  {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        match self {
+            Self::Ptr(ins) => write!(f, "{}", ins),
+            Self::Val(ws) => write!(f, "{}", ws.borrow())
+        }
+    }
+} 
 
 struct FacilitySimulation<'a> {
     events: VecDeque<FacilityEvent>,
@@ -83,14 +93,14 @@ impl FacilitySimulation<'_> {
             .collect();
         let mut min = (0, Duration::never(), false);
         for (idx, val) in response_times.iter().enumerate() {
-            println!("actor: {:?}, {:?}", idx, val);
+            println!("actor: {:?}, {}\t{}", idx, val, self.actors[idx]);
             if !val.as_minutes().is_infinite() && val < &min.1 {
                 min.0 = idx;
                 min.1 = *val;
                 min.2 = true;
             }
         }
-        println!("min {:?}", min);
+        println!("Next event in: {}, actor: {}\n\n", min.1, min.0);
         match min.2 {
             false => None,
             true => Some((min.0, min.1)) 
@@ -107,11 +117,10 @@ impl FacilitySimulation<'_> {
                 (next_actor_index, 
                 duration)) = self.time_until_next_actor_event(self.clock) {
             self.clock += duration;
-            println!("Time: {:?}", self.clock);
+            println!("Time: {}", self.clock);
             let responses = self.actors[next_actor_index]
                 .respond(self.clock, duration);
             for response in responses {
-                println!("response {:?}", response);
                 self.dispatch_to_simulation_actors(response);  
             } 
         }

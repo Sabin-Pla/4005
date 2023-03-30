@@ -1,8 +1,8 @@
-
+use std::fmt::{Display, Formatter, Result};
 use crate::simulation::{Duration, TimeStamp};
 
 // components have an inspection duration
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Component {
     C1(Duration, Option<TimeStamp>, Option<TimeStamp>),
     C2(Duration, Option<TimeStamp>, Option<TimeStamp>),
@@ -51,5 +51,11 @@ impl Component {
             Self::C2(..) => "C2",
             Self::C3(..) => "C3"
         }
+    }
+}
+
+impl Display for Component {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(f, "{}", self.name())
     }
 }

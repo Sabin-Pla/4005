@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::fmt::{Display, Result, Formatter};
 
 use crate::Product;
 use crate::component::Component;
@@ -45,7 +46,13 @@ pub trait Inspector {
         }
     }
 
+    fn set_unblocked(&mut self);
+
+    fn set_blocked(&mut self);
+
     fn next_end_time(&self) -> Option<TimeStamp>; 
+
+    fn hold_component(&mut self, component: Component);
 
     fn name(&self) -> &str {
         match self.is_1() {
@@ -60,7 +67,8 @@ pub struct Inspector1 {
     ws: [Rc<RefCell<Workstation>>; 3],
     durations_c1: VecDeque<Duration>,
     held_component: Option<Component>,
-    next_finish_time: Option<TimeStamp>
+    next_finish_time: Option<TimeStamp>,
+    is_blocked: bool
 }
 
 impl Inspector1 {
@@ -70,7 +78,8 @@ impl Inspector1 {
             ws,
             durations_c1,
             held_component: None,
-            next_finish_time: None
+            next_finish_time: None,
+            is_blocked: false
         }
     }
 }
@@ -94,6 +103,10 @@ impl Inspector for Inspector1 {
     }
 
     fn is_1(&self) -> bool { true }
+
+    fn is_blocked(&self) -> bool {
+        self.is_blocked
+    }
 
     fn dispatch_component(&mut self, 
             c: Component, now: TimeStamp) -> EnqueueResult {
@@ -123,6 +136,7 @@ impl Inspector for Inspector1 {
     }
 
     fn inspect_next(&mut self, now: TimeStamp) -> Option<Component> {
+        assert!(!self.is_blocked());
         match self.durations_c1.pop_front() {
             Some(duration) => {
                 self.next_finish_time = Some(now + duration);
@@ -137,6 +151,19 @@ impl Inspector for Inspector1 {
     fn next_end_time(&self) -> Option<TimeStamp> {
         self.next_finish_time
     }
+
+    fn hold_component(&mut self, component: Component) {
+        self.held_component = Some(component);
+    }
+
+    fn set_unblocked(&mut self) {
+        self.is_blocked = false;
+    }
+
+    fn set_blocked(&mut self) {
+        assert!(!self.is_blocked);
+        self.is_blocked = true;
+    }
 }
 
 pub struct Inspector2 {
@@ -145,6 +172,7 @@ pub struct Inspector2 {
     durations_c3: VecDeque<Duration>,
     held_component: Option<Component>,
     next_finish_time: Option<TimeStamp>,
+    is_blocked: bool,
     random: Random
 }
 
@@ -159,6 +187,7 @@ impl Inspector2 {
             durations_c3,
             held_component: None,
             next_finish_time: None,
+            is_blocked: false,
             random: Random::new()
         }
     }
@@ -230,6 +259,23 @@ impl Inspector for Inspector2 {
     fn next_end_time(&self) -> Option<TimeStamp> {
         self.next_finish_time
     }
+
+    fn hold_component(&mut self, component: Component) {
+        self.held_component = Some(component);
+    }
+
+    fn is_blocked(&self) -> bool {
+        self.is_blocked
+    }
+
+    fn set_unblocked(&mut self) {
+        self.is_blocked = false;
+    }
+
+    fn set_blocked(&mut self) {
+        assert!(!self.is_blocked);
+        self.is_blocked = true;
+    }
 }
 
 
@@ -245,12 +291,18 @@ impl SimulationActor for &mut dyn Inspector {
                 match self.produces(product) {
                     true => {
                         match self.take_held_component() {
-                            Some(c) => {
+                            Some(component) => {
                                 match FacilityEvent::inspector_tries_unblock_self(
-                                        self.dispatch_component(c, event.timestamp()),
+                                        self.dispatch_component(component, event.timestamp()),
                                         product.timestamp()) {
-                                    Some(follow_up_events) => follow_up_events.to_vec(),
-                                    None => Vec::default()  
+                                    Some(ws_start_event) => {
+                                        self.set_unblocked();
+                                        vec!(ws_start_event)
+                                    },
+                                    None => {
+                                        self.hold_component(component);
+                                        Vec::default()
+                                    }  
                                 }
                             }
                             None => Vec::default() // the inspector may not have been given anything yet
@@ -259,39 +311,39 @@ impl SimulationActor for &mut dyn Inspector {
                     false => Vec::default()
                 }
             },
-
             FacilityEvent::SimulationStarted => {
-                vec!(FacilityEvent::StartedInspection(
-                    self.is_1(), 
-                    self.inspect_next(event.timestamp())
-                        .expect(
-                            format!("Failure loading inspection times for {}", self.name()).as_str())
-                    ))
+                assert!(!self.is_blocked());
+                self.inspect_next(event.timestamp())
+                    .expect(
+                        format!("Failure loading inspection times for {}", 
+                            self.name()).as_str());
+                Vec::default()
             },
-
-            FacilityEvent::FinishedInspection(ins1, mut component) => {
-
-                let r = match self.is_1() == ins1 {
-                    true => FacilityEvent::inspector_places(
-                        self.dispatch_component(component, 
-                            component.inspection_end_time())).to_vec(),
-                    false => Vec::default()
-                };
-                println!("RIGHT HERE {:?}", r);
-                r
-            },
-
             _ => Vec::default()
         }
     }
 
     fn respond(&mut self, now: TimeStamp, duration: Duration) -> Vec<FacilityEvent> {
-        //assert!(self.duration_until_next_event(now).unwrap_or(0) == 0);
-        println!("responding: {:?}", self.name());
+        // is called when inspector finishes, but never to unblock the inspector
+        // unblocking is done through respond_to(WorkstationStarted)
+        assert!(!self.is_blocked());
         let mut component = self.take_held_component().expect("wrong inspector");
         component.finish_inspecting(now);
-        vec!(FacilityEvent::FinishedInspection(
-            self.is_1(), component))
+        match self.dispatch_component(component, component.inspection_end_time()) {
+            EnqueueResult::Fail => {
+                // inspector is blocked!
+                self.set_blocked();
+                self.hold_component(component);
+                Vec::default()
+            },
+            EnqueueResult::CouldEnqueue(ins1, component, ws, ts) => {
+                self.inspect_next(ts); // start inspecting the next item      
+                match ws.can_work() {
+                    true => vec!(FacilityEvent::WorkstationStarted(ws, ts)),
+                    false => Vec::default()
+                }
+            }
+        }
     }
     
     fn duration_until_next_event(&self, now: TimeStamp) -> Option<Duration> {
@@ -303,6 +355,16 @@ impl SimulationActor for &mut dyn Inspector {
                    None => None 
                 }
             }
+        }
+    }
+}
+
+impl Display for &mut dyn Inspector {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        match self.next_end_time() {
+            Some(ts) => write!(f, "{} | blocked: {} | {}", 
+                self.name(), self.is_blocked(), ts),
+            None => write!(f, "{} | blocked: {}", self.name(), self.is_blocked())
         }
     }
 }

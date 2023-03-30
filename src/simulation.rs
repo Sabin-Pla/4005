@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::ops::{Add, Sub, AddAssign};
+use std::fmt::{Display, Result, Formatter};
 
 use crate::event::FacilityEvent;
 
@@ -18,6 +19,12 @@ impl TimeStamp {
 	pub fn get(&self) -> f64 {
 		self.minutes
 	} 
+}
+
+impl Display for TimeStamp {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(f, "{:.2}", self.minutes)
+    }
 }
 
 impl Add<Duration> for TimeStamp {
@@ -48,6 +55,12 @@ impl Sub<TimeStamp> for TimeStamp {
 #[derive(Copy, Clone, Debug, PartialEq, PartialOrd)]
 pub struct Duration {
 	minutes: f64
+}
+
+impl Display for Duration {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        write!(f, "{:.2}", self.minutes)
+    }
 }
 
 impl Ord for Duration {
