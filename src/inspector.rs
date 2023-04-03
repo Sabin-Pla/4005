@@ -17,8 +17,7 @@ pub trait Inspector {
 
     fn inspect_next(&mut self, now: TimeStamp) -> Option<Component>;
 
-    fn dispatch_component(&mut self, 
-        c: Component, now: TimeStamp) -> EnqueueResult;
+    fn dispatch_component(&mut self, i: usize, now: TimeStamp) -> EnqueueResult;
 
     fn is_1(&self) -> bool;
 
@@ -35,24 +34,16 @@ pub trait Inspector {
         }
     } 
 
-    fn has_component(&self) -> bool;
+    fn held_components(&self, finished_only: bool) -> Vec<usize>;
 
-    fn take_held_component(&mut self) -> Option<Component>;
+    fn is_blocked(&self) -> bool;
 
-    fn is_blocked(&self) -> bool {
-        match self.next_end_time() {
-            Some(_) => false,
-            None    => self.has_component()
-        }
-    }
+    fn set_unblocked(&mut self, now: TimeStamp);
 
-    fn set_unblocked(&mut self);
-
-    fn set_blocked(&mut self);
+    fn set_blocked(&mut self, now: TimeStamp);
 
     fn next_end_time(&self) -> Option<TimeStamp>; 
 
-    fn hold_component(&mut self, component: Component);
 
     fn name(&self) -> &str {
         match self.is_1() {
@@ -60,7 +51,63 @@ pub trait Inspector {
             false => "Inspector2"
         }
     }
+
+    fn place_routine(&mut self, now: TimeStamp, 
+            expect_blocked: bool) -> Option<FacilityEvent> {
+        if expect_blocked {
+            assert!(self.is_blocked());
+        } else {
+            assert!(!self.is_blocked());
+        }
+
+        for i in self.held_components(true) {
+            match self.dispatch_component(i, now) {
+                EnqueueResult::CouldEnqueue(
+                        _, component, 
+                        ws, ts, 
+                        ws_is_working) => {
+
+                    log!("Enqueue {} {} {} {} {}", self.is_1(),
+                        component, ws.name(), ws.can_work(), ws_is_working);
+                    assert!(ws.contains(component));
+                    self.remove_component(i);
+                    if expect_blocked {
+                        self.set_unblocked(now);
+                    }
+                    self.inspect_next(now);
+                    return match !ws_is_working && ws.can_work() {
+                        false => None, // ws restarted itself
+                        true => Some(FacilityEvent::WorkstationStarted(
+                            ws, ts))
+                    }
+                },
+                EnqueueResult::Fail => continue  
+            };
+        }
+
+        if !self.is_1() && self.held_components(false).len() < 2 {
+            self.inspect_next(now);
+            self.set_unblocked(now);
+            return None;
+        }
+
+        if !expect_blocked {
+            self.set_blocked(now);
+        }
+        None
+    }
+
+    // returns the list of timestamps block set_blocked and set_unblocked
+    // were called
+    fn blocked_times(&self) -> &Vec<TimeStamp>;
+
+    fn remove_component(&mut self, i: usize);
+
+    fn finish_inspection(&mut self, now: TimeStamp);
+
+    fn working_on(&self) -> String;
 }
+
 
 
 pub struct Inspector1 {
@@ -68,7 +115,9 @@ pub struct Inspector1 {
     durations_c1: VecDeque<Duration>,
     held_component: Option<Component>,
     next_finish_time: Option<TimeStamp>,
-    is_blocked: bool
+    is_blocked: bool,
+    // logs each time a block operation is called
+    blocked_times: Vec<TimeStamp>
 }
 
 impl Inspector1 {
@@ -79,59 +128,60 @@ impl Inspector1 {
             durations_c1,
             held_component: None,
             next_finish_time: None,
-            is_blocked: false
+            is_blocked: true,
+            blocked_times: vec!()
         }
     }
 }
 
 impl Inspector for Inspector1 {
 
-    fn take_held_component(&mut self) -> Option<Component> {
+    fn held_components(&self, finished_only: bool) -> Vec<usize> {
         match self.held_component {
-            Some(_) => {
-                let c = self.held_component;
-                self.held_component = None;
-                self.next_finish_time = None;
-                return c;
-            },
-            None => None
+            Some(c) => vec!(0),
+            None => vec!()
         }
-    }
-
-    fn has_component(&self) -> bool {
-        matches!(self.held_component, Some(_))
     }
 
     fn is_1(&self) -> bool { true }
 
     fn is_blocked(&self) -> bool {
         self.is_blocked
+    }  
+
+    fn blocked_times(&self) -> &Vec<TimeStamp> {
+        &self.blocked_times
     }
 
-    fn dispatch_component(&mut self, 
-            c: Component, now: TimeStamp) -> EnqueueResult {
-        // moves component into the workstation 
-        // with the least number of components
-        // in waiting
-        if self.is_blocked() {
-            panic!("dispatch for Inspector1 should never be called while blocked");
+    fn working_on(&self) -> String {
+        match self.held_component {
+            Some(c1) => "C1".to_string(),
+            None => "".to_string()
         }
+    }
+
+    fn dispatch_component(&mut self, i: usize, now: TimeStamp) -> EnqueueResult {
+        // attempts to move the component at index i into a workstation 
+        assert!(i == 0); // there is only 1 index
+        let c = self.held_component.expect("dispatch called but there is no component");
+        assert!(c.is_finished());
         assert!(matches!(c, Component::C1(..)));
 
         let mut ws1 = self.ws[0].borrow_mut();
         let mut ws2 = self.ws[1].borrow_mut();
         let mut ws3 = self.ws[2].borrow_mut();
         let awaiting = [
-            ws1.unprocessed_components(), 
-            ws2.unprocessed_components(), 
-            ws3.unprocessed_components()];
-    
-        if awaiting[0] >= awaiting[1] &&  awaiting[0] >= awaiting[2] {
-            return ws1.enqueue(true, c, now);
-        } else if awaiting[1] >= awaiting[2] {
-            return ws2.enqueue(true, c, now);
-        } else {
+            ws1.c1_in_waiting(), 
+            ws2.c1_in_waiting(), 
+            ws3.c1_in_waiting()];
+        if awaiting[2] < awaiting[1] &&  awaiting[2] < awaiting[0] {
             return ws3.enqueue(true, c, now);
+        } else if awaiting[1] <= awaiting[2] && awaiting[1] < awaiting[0] {
+            return ws2.enqueue(true, c, now);
+        } else if awaiting[0] <= awaiting[1] && awaiting[0] <= awaiting[2] { 
+            return ws1.enqueue(true, c, now);
+        } else {
+            panic!("Bad branch")
         }
     }
 
@@ -144,7 +194,11 @@ impl Inspector for Inspector1 {
                 self.held_component = component;
                 component
             },
-            None => None
+            None => {
+                log!("Inspector1 has no more components to inspect");
+                self.next_finish_time = None;
+                None
+            }
         }
     }
 
@@ -152,17 +206,29 @@ impl Inspector for Inspector1 {
         self.next_finish_time
     }
 
-    fn hold_component(&mut self, component: Component) {
-        self.held_component = Some(component);
-    }
 
-    fn set_unblocked(&mut self) {
+    fn set_unblocked(&mut self, now: TimeStamp) {
+        assert!(self.is_blocked);
+        self.blocked_times.push(now);
         self.is_blocked = false;
     }
 
-    fn set_blocked(&mut self) {
+    fn set_blocked(&mut self, now: TimeStamp) {
         assert!(!self.is_blocked);
+        self.blocked_times.push(now);
         self.is_blocked = true;
+    }
+
+    fn remove_component(&mut self, i: usize) {
+        assert!(i == 0);
+        assert!(matches!(self.held_component, Some(_)));
+        self.held_component = None;
+    }
+
+    fn finish_inspection(&mut self, now: TimeStamp) {
+        let mut c = self.held_component.expect("no ins1 component to finish inspecting");
+        c.finish_inspecting(now);
+        self.held_component = Some(c);
     }
 }
 
@@ -170,10 +236,12 @@ pub struct Inspector2 {
     ws: [Rc<RefCell<Workstation>>; 2],
     durations_c2: VecDeque<Duration>,
     durations_c3: VecDeque<Duration>,
-    held_component: Option<Component>,
-    next_finish_time: Option<TimeStamp>,
+    held_c2: Option<Component>,
+    held_c3: Option<Component>,
+    next_finish_time: Option<(Component, TimeStamp)>,
     is_blocked: bool,
-    random: Random
+    random: Random,
+    blocked_times: Vec<TimeStamp>
 }
 
 impl Inspector2 {
@@ -185,14 +253,23 @@ impl Inspector2 {
             ws,
             durations_c2,
             durations_c3,
-            held_component: None,
+            held_c2: None,
+            held_c3: None,
             next_finish_time: None,
-            is_blocked: false,
-            random: Random::new()
+            is_blocked: true,
+            random: Random::new(),
+            blocked_times: vec!()
         }
     }
 
     fn decide_next_component(&mut self) -> Option<Component> {
+        // decides the next component.
+        // first pick from the only available set of components (if there is only 1).
+        // If both sets are available, start working on whatever is blocked.
+        // If neither case is true, pick a component at random.
+
+        log!("Deciding next");
+
         if self.durations_c2.len() == 0 && self.durations_c3.len() != 0 {
             return Some(
                 Component::C3(self.durations_c3.pop_front().unwrap(), None, None));
@@ -200,6 +277,28 @@ impl Inspector2 {
             return Some(
                 Component::C2(self.durations_c2.pop_front().unwrap(), None, None));
         } else if self.durations_c2.len() != 0 && self.durations_c3.len() != 0 {
+
+        
+            let c2_count = self.ws[0].borrow()
+                .matching_count(Component::C2(Duration::never(), None, None));
+            let c3_count = self.ws[1].borrow()
+                .matching_count(Component::C3(Duration::never(), None, None));
+
+         
+            if c2_count == 2 &&  c3_count != 2 && !self.held_c3.is_some()  {
+                return Some(Component::C3(
+                        self.durations_c3.pop_front().unwrap(), 
+                        None, None));   
+            } else if c3_count == 2 && c2_count != 2 && !self.held_c2.is_some() {
+                return Some(
+                    Component::C2(
+                        self.durations_c2.pop_front().unwrap(), 
+                        None, None));
+            } else if c3_count == 2  && c2_count == 2 {
+                return None;
+            }
+            
+            log!("Inspector 2 picking next random component {c2_count} {c3_count}");
             return match self.random.boolean() {
                 true => Some(
                     Component::C3(
@@ -219,27 +318,39 @@ impl Inspector for Inspector2 {
 
     fn is_1(&self) -> bool { false }
 
-    fn take_held_component(&mut self) -> Option<Component> {
-        let c = self.held_component;
-        self.held_component = None;
-        self.next_finish_time = None;
-        return c;
-    }
+    fn held_components(&self, finished_only: bool) -> Vec<usize> {
+        let mut v = vec!();
 
-    fn has_component(&self) -> bool {
-        matches!(self.held_component, Some(_))
-    }
-
-    fn dispatch_component(&mut self, 
-            c: Component, now: TimeStamp) -> EnqueueResult {
-        if self.is_blocked() {
-            panic!("Inspector should never be called while blocked");
+        if self.held_c2.is_some() && 
+                ((finished_only && self.held_c2.unwrap().is_finished()) ||
+                !finished_only) {
+            v.push(2);
         }
+        if self.held_c3.is_some() &&
+                ((finished_only && self.held_c3.unwrap().is_finished()) ||
+                !finished_only) {
+            v.push(3);
+        }    
+        v
+    }
 
-        match c {
-            Component::C2(..) => self.ws[0].borrow_mut().enqueue(false, c, now),
-            Component::C3(..) => self.ws[1].borrow_mut().enqueue(false, c, now),
-            Component::C1(..) => panic!("Inspector 2 does not inspect Component 1")
+    fn blocked_times(&self) -> &Vec<TimeStamp> {
+        &self.blocked_times
+    }
+
+    fn dispatch_component(&mut self, i: usize, now: TimeStamp) -> EnqueueResult {
+        let c = match i {
+            2 => self.held_c2.unwrap(),
+            3 => self.held_c3.unwrap(),
+            _ => panic!()
+        };
+        match c.is_finished() {
+            true => match c {
+                Component::C2(..) => self.ws[0].borrow_mut().enqueue(false, c, now),
+                Component::C3(..) => self.ws[1].borrow_mut().enqueue(false, c, now),
+                Component::C1(..) => panic!("Inspector 2 does not inspect Component 1")
+            },
+            false => EnqueueResult::Fail
         }
     }
 
@@ -247,103 +358,136 @@ impl Inspector for Inspector2 {
         match self.decide_next_component() {
             Some(mut component) => {
                 component.start_inspecting(now);
-                self.next_finish_time = Some(now + component.duration());
-                let component = Some(component);
-                self.held_component = component;
-                component
+                self.next_finish_time = Some((component, now + component.duration()));
+                match component {
+                    Component::C1(..) => panic!(),
+                    Component::C2(..) => {
+                        assert!(matches!(self.held_c2, None));
+                        self.held_c2 = Some(component);
+                    },
+                    Component::C3(..) => {
+                        assert!(matches!(self.held_c3, None));
+                        self.held_c3 = Some(component);
+                    }
+                }
+                self.inspection_times.push((now, component));
+                Some(component)
             },
-            None => None
+            None => {
+                self.set_blocked(now);
+                self.next_finish_time = None;
+                None
+            }
         }
     }
 
     fn next_end_time(&self) -> Option<TimeStamp> {
-        self.next_finish_time
+        match self.next_finish_time {
+            Some((_c, ts)) => Some(ts),
+            None => None
+        }
     }
 
-    fn hold_component(&mut self, component: Component) {
-        self.held_component = Some(component);
-    }
 
     fn is_blocked(&self) -> bool {
         self.is_blocked
     }
 
-    fn set_unblocked(&mut self) {
+    fn set_unblocked(&mut self, now: TimeStamp) {
+        assert!(self.is_blocked);
+        self.blocked_times.push(now);
         self.is_blocked = false;
     }
 
-    fn set_blocked(&mut self) {
+    fn set_blocked(&mut self, now: TimeStamp) {
         assert!(!self.is_blocked);
+        self.blocked_times.push(now);
         self.is_blocked = true;
+    }
+
+    fn remove_component(&mut self, i: usize) {
+         match i {
+            2 => self.held_c2 = None,
+            3 => self.held_c3 = None,
+            _ => panic!()
+        }
+    }
+
+    fn finish_inspection(&mut self, now: TimeStamp) {
+        if let Some(mut c2) = self.held_c2 {
+            if !c2.is_finished() {
+                c2.finish_inspecting(now);
+                assert!(matches!(c2, Component::C2(..)));
+                self.held_c2 = Some(c2);
+            }
+        } else if let Some(mut c3) = self.held_c3 {
+            if !c3.is_finished() {
+                c3.finish_inspecting(now);
+                assert!(matches!(c3, Component::C3(..)));
+                self.held_c3 = Some(c3);
+            }
+        }
+    }
+
+    fn working_on(&self) -> String {
+        // gets a string representing what 
+        // inspector 2 is working on. i.e, [, C3 (in progress)]
+        // one element is always in progress and one is always done 
+        // (or not present)
+
+        let status = |done: bool| -> &str {
+            match done {
+                false => "(in progress)",
+                true => "(done)"
+            }
+        };
+
+        let s1 = match self.held_c2 {
+            Some(c1) => format!("C2 {}", status(c1.is_finished())),
+            None => "".to_string()
+        };
+
+        let s2 = match self.held_c3 {
+            Some(c1) => format!("C3 {}", status(c1.is_finished())),
+            None => "".to_string()
+        };
+
+
+        format!("[{}, {}]", s1, s2)
     }
 }
 
 
 impl SimulationActor for &mut dyn Inspector {
-    fn respond_to(&mut self, event: FacilityEvent) -> Vec<FacilityEvent> {
+    fn respond_to(&mut self, event: FacilityEvent) -> Option<FacilityEvent> {
         match event {
 
             // if a workstation assembled a component
-            // then the inspector may no longer be blocked, so
-            // the inspector should return an event to enqueue
-            // an item if they hold a component
+            // then the inspector may no longer be blocked
             FacilityEvent::Assembled(product, _ws) => {
-                match self.produces(product) {
-                    true => {
-                        match self.take_held_component() {
-                            Some(component) => {
-                                match FacilityEvent::inspector_tries_unblock_self(
-                                        self.dispatch_component(component, event.timestamp()),
-                                        product.timestamp()) {
-                                    Some(ws_start_event) => {
-                                        self.set_unblocked();
-                                        vec!(ws_start_event)
-                                    },
-                                    None => {
-                                        self.hold_component(component);
-                                        Vec::default()
-                                    }  
-                                }
-                            }
-                            None => Vec::default() // the inspector may not have been given anything yet
-                        }
-                    },
-                    false => Vec::default()
+                match self.produces(product) && self.is_blocked() {
+                    true => self.place_routine(product.timestamp(), true),
+                    false => None // Not this inspector
                 }
             },
             FacilityEvent::SimulationStarted => {
-                assert!(!self.is_blocked());
+                self.set_unblocked(event.timestamp());   
                 self.inspect_next(event.timestamp())
                     .expect(
                         format!("Failure loading inspection times for {}", 
                             self.name()).as_str());
-                Vec::default()
+                None
             },
-            _ => Vec::default()
+            _ => None
         }
     }
 
-    fn respond(&mut self, now: TimeStamp, duration: Duration) -> Vec<FacilityEvent> {
+    fn respond(&mut self, now: TimeStamp) -> Option<FacilityEvent> {
         // is called when inspector finishes, but never to unblock the inspector
-        // unblocking is done through respond_to(WorkstationStarted)
+        // unblocking is done through respond_to(FacilityEvent::Assembled)
         assert!(!self.is_blocked());
-        let mut component = self.take_held_component().expect("wrong inspector");
-        component.finish_inspecting(now);
-        match self.dispatch_component(component, component.inspection_end_time()) {
-            EnqueueResult::Fail => {
-                // inspector is blocked!
-                self.set_blocked();
-                self.hold_component(component);
-                Vec::default()
-            },
-            EnqueueResult::CouldEnqueue(ins1, component, ws, ts) => {
-                self.inspect_next(ts); // start inspecting the next item      
-                match ws.can_work() {
-                    true => vec!(FacilityEvent::WorkstationStarted(ws, ts)),
-                    false => Vec::default()
-                }
-            }
-        }
+        self.finish_inspection(now);
+        self.place_routine(now, false)
     }
     
     fn duration_until_next_event(&self, now: TimeStamp) -> Option<Duration> {
@@ -361,10 +505,10 @@ impl SimulationActor for &mut dyn Inspector {
 
 impl Display for &mut dyn Inspector {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        match self.next_end_time() {
-            Some(ts) => write!(f, "{} | blocked: {} | {}", 
-                self.name(), self.is_blocked(), ts),
-            None => write!(f, "{} | blocked: {}", self.name(), self.is_blocked())
-        }
+       write!(f, "{} | blocked: {} | holding {} | in queue: {}", 
+            self.name(), self.is_blocked(), 
+            self.held_components(false).len(), 
+            self.working_on())
+        
     }
 }

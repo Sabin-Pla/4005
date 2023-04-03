@@ -29,7 +29,7 @@ impl Display for Type {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug)]
 pub enum Type {
     W1(Buffer), // P1
     W2(Buffer, Buffer), // P2
@@ -62,7 +62,47 @@ impl Type {
             Self::W2(buf1, buf2) => in_buf(buf1, component) || in_buf(buf2, component),
             Self::W3(buf1, buf2) => in_buf(buf1, component) || in_buf(buf2, component)
         }
+    }
+
+    fn present_count(buf: &Buffer) -> usize {
+        let count_slot = |i| {
+            match buf[i] {
+                Some(_) => 1,
+                None => 0
+            }
+        };
+        count_slot(0) + count_slot(1) 
+    }
+
+    pub fn c1_in_waiting(&self) -> usize {
+        match self {
+            Self::W1(buf) => Self::present_count(&buf),
+            Self::W2(buf1, _) => Self::present_count(&buf1), 
+            Self::W3(buf1, _) => Self::present_count(&buf1)
+        }
     } 
+
+    pub fn matching_count(&self, component: Component) -> usize {
+        match component {
+            Component::C1(..) => self.c1_in_waiting(),
+            _ =>  {
+                match self {
+                    Self::W1(_) => panic!("{self} does not make {component}"),
+                    Self::W2(_, buf2) => Self::present_count(buf2), 
+                    Self::W3(_, buf2) => Self::present_count(buf2)
+                }
+            }
+        }
+    } 
+
+    pub fn name(&self) -> String {
+        let id = match self {
+            Self::W1(_) => "1", 
+            Self::W2(..) => "2",
+            Self::W3(..) => "3"
+        };
+        format!("WS{id}")
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -70,11 +110,17 @@ pub struct Workstation {
     assembly_durations: VecDeque<Duration>,
     current_duration: Option<(TimeStamp, Duration)>, // (start time, duration)
     ws_type: Type,
+    pub products: Vec<Product>,
+    pub buffer_states: Vec<(TimeStamp, Type)>
 }
 
 impl Display for Workstation {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result {
-        write!(f, "{} {}", self.name(), self.ws_type)
+        match self.current_duration {
+            Some((ts, duration)) => write!(f, "{} {}\t| started: {} | duration {}",
+                self.name(), self.ws_type, ts, duration),
+            None => write!(f, "{} {}", self.name(), self.ws_type)
+        }
     }
 }
 
@@ -84,26 +130,22 @@ impl Workstation {
         Workstation {
             assembly_durations,
             ws_type,
-            current_duration: None
+            current_duration: None,
+            products: vec!(),
+            buffer_states: vec!((TimeStamp::start(), ws_type))
         }
     }
 
     pub fn name(&self) -> String {
-        let id = match self.ws_type {
-            Type::W1(_) => "1", 
-            Type::W2(..) => "2",
-            Type::W3(..) => "3"
-        };
-        format!("WS{id}")
+        self.ws_type.name()
     }
 
-    fn empty_count(buf: &Buffer) -> usize {
-        buf.iter().fold(0, |acc, c| {
-            acc + match c {
-                Some(_) => 0,
-                None => 1
-            }
-        })
+    pub fn is_working(&self) -> bool {
+        matches!(self.current_duration, Some(_))
+    }
+
+    pub fn matching_count(&self, component: Component) -> usize {
+        self.ws_type.matching_count(component)
     }
 
     fn assemble(&mut self, timestamp: TimeStamp) -> Product {
@@ -113,7 +155,7 @@ impl Workstation {
         let take_first_avail = |buf: &mut Buffer| -> Component {
             match buf[1] {
                 Some(c) => {
-                    let comp = buf[1].unwrap();
+                    let comp = c;
                     buf[1] = None;
                     comp
                 }
@@ -125,48 +167,43 @@ impl Workstation {
             }
         };
 
-        match self.ws_type {
-            Type::W1(mut buf) => {
-                let component = take_first_avail(&mut buf);
+        match &mut self.ws_type {    
+            Type::W1(buf) => {
+                let component = take_first_avail(buf);
                 Product::from(component, None, timestamp)
             },
-            Type::W2(mut buf1, mut buf2) => {
-                let first = take_first_avail(&mut buf1);
-                let second = take_first_avail(&mut buf2);
+            Type::W2(buf1, buf2) => {
+                let first = take_first_avail(buf1);
+                let second = take_first_avail(buf2);
                 Product::from(first, Some(second), timestamp)
             },
-            Type::W3(mut buf1, mut buf2) => {
-                let first = take_first_avail(&mut buf1);
-                let second = take_first_avail(&mut buf2);
+            Type::W3(buf1, buf2) => {
+                let first = take_first_avail(buf1);
+                let second = take_first_avail(buf2);
                 Product::from(first, Some(second), timestamp)
             }
         }
     }
 
-    pub fn unprocessed_components(&self) -> usize {
-        match self.ws_type {
-            Type::W1(mut buf) => Self::empty_count(&mut buf),
-            Type::W2(mut buf1, mut buf2) => Self::empty_count(&mut buf1) + 
-                Self::empty_count(&mut buf2),
-            Type::W3(mut buf1, mut buf2) => Self::empty_count(&mut buf1) + 
-                Self::empty_count(&mut buf2)
-        }
+    pub fn c1_in_waiting(&self) -> usize {
+        self.ws_type.c1_in_waiting()
     }
 
     pub fn enqueue(&mut self, ins1: bool, 
             c: Component, now: TimeStamp) -> EnqueueResult {
+        assert!(c.is_finished(), "{} {}", ins1, c);
 
         let add_to_buffer = |buf: &mut Buffer, c| {
             // put c in next available slot in buffer 
             // buffer cannot be full
             if !buf[1].is_none() {
-                return false;
+                return (false, *buf);
             }
             match buf[0] {
                 Some(_) => buf[1] = Some(c),
                 None => buf[0] = Some(c)
             };
-            true
+            (true, *buf)
         };
 
         let decide_buffer = |buf_c1: &mut  Buffer, other_buffer: &mut  Buffer, c| {
@@ -177,50 +214,65 @@ impl Workstation {
             }
         };
 
-        let result = match &mut self.ws_type {
+        let (result, _) = match &mut self.ws_type {
             Type::W1(buf_c1) => add_to_buffer(buf_c1, c),
             Type::W2(buf_c1, buf_c2) => decide_buffer(buf_c1, buf_c2, c),
             Type::W3(buf_c1, buf_c3) => decide_buffer(buf_c1, buf_c3, c),
         };
+        self.buffer_states.push((now, self.ws_type));
         match result {
-            true => EnqueueResult::CouldEnqueue(ins1, c, self.ws_type, now),
+            true => EnqueueResult::CouldEnqueue(ins1, 
+                c, self.ws_type, now, self.is_working()),
             false => EnqueueResult::Fail
         }
+    }
+
+    fn start(&mut self, start_time: TimeStamp) {
+        assert!(matches!(self.current_duration, None),
+            "WS {} which is already working was started", self.name());
+        let duration = self.assembly_durations
+            .pop_front().expect(format!("WS was started but \
+            has no remaining duration {}", self.products.len()).as_str());
+        self.current_duration = Some((start_time, duration));
     }
 }
 
 
 impl SimulationActor for Workstation {
-    fn respond_to(&mut self, event: FacilityEvent) -> Vec<FacilityEvent> {
+    fn respond_to(&mut self, event: FacilityEvent) -> Option<FacilityEvent> {
         match event {
             FacilityEvent::WorkstationStarted(ws, start_time) => {
                 if &self.ws_type == &ws {
-                    println!("{} was started {}", self.name(), ws);
-                    assert!(matches!(self.current_duration, None),
-                        "WS {} which is already working was started", self.name());
-                    let duration = self.assembly_durations
-                        .pop_front().expect("WS was started but \
-                        has no remaining duration");
-                    self.current_duration = Some((start_time, duration));
+                    self.start(start_time);
                 }
-                Vec::default()
+                None
             },
-            _ => Vec::default()
+            _ => None
         }
     }
 
-    fn respond(&mut self, now: TimeStamp, duration: Duration) -> Vec<FacilityEvent> {
+    fn respond(&mut self, now: TimeStamp) -> Option<FacilityEvent> {
 
         // time until done should be zero, given margin of error for f64
         let time_until_done = self.duration_until_next_event(now).expect(
             format!("WS {} called with respond(now, duration) but isn't marked \
                 as working (has no self.current_duration)", self.name().as_str()
                 ).as_str()); 
-        assert!(time_until_done.as_minutes() <= f64::EPSILON * 0.005);
+        assert!(time_until_done.as_minutes() <= 1000.0 * f64::EPSILON);
 
         self.current_duration = None;
-        vec!(FacilityEvent::Assembled(
-            self.assemble(now), self.ws_type))
+        let product = self.assemble(now);
+        let assembly_event = FacilityEvent::Assembled(
+            product, self.ws_type);
+        self.products.push(product);
+        self.buffer_states.push((now, self.ws_type));
+
+        // start working on the next product if it can
+        if self.ws_type.can_work() {
+            self.start(now);
+        }
+
+        Some(assembly_event)
     }
 
     fn duration_until_next_event(&self, now: TimeStamp) -> Option<Duration> {
