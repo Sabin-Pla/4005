@@ -23,7 +23,7 @@ pub trait Inspector {
 
     fn produces(&self, product: Product) -> bool {
         match self.is_1() {
-            true => matches!(product, Product::P1(_, _)),
+            true => matches!(product, Product::P1(..)),
             false => {
                 match product {
                     Product::P1(..) => false,
@@ -106,6 +106,9 @@ pub trait Inspector {
     fn finish_inspection(&mut self, now: TimeStamp);
 
     fn working_on(&self) -> String;
+
+    fn inspection_times(&mut self) -> 
+        (&mut VecDeque<(TimeStamp, usize)>, &mut VecDeque<TimeStamp>) ;
 }
 
 
@@ -117,7 +120,9 @@ pub struct Inspector1 {
     next_finish_time: Option<TimeStamp>,
     is_blocked: bool,
     // logs each time a block operation is called
-    blocked_times: Vec<TimeStamp>
+    blocked_times: Vec<TimeStamp>,
+    inspection_times: VecDeque<(TimeStamp, usize)>,
+    departure_times: VecDeque<TimeStamp>
 }
 
 impl Inspector1 {
@@ -129,7 +134,9 @@ impl Inspector1 {
             held_component: None,
             next_finish_time: None,
             is_blocked: true,
-            blocked_times: vec!()
+            blocked_times: vec!(),
+            inspection_times: vec!().into(),
+            departure_times: vec!().into()
         }
     }
 }
@@ -190,9 +197,15 @@ impl Inspector for Inspector1 {
         match self.durations_c1.pop_front() {
             Some(duration) => {
                 self.next_finish_time = Some(now + duration);
-                let component = Some(Component::C1(duration, Some(now), None));
+                let mut component = Component::new(duration, 1);
+                component.start_inspecting(now);
+                let component = Some(component);
                 self.held_component = component;
-                component
+                let c1_in_system = (0..3).map(|i|
+                    self.ws[i].borrow_mut().c1_in_waiting()).sum::<usize>() + 
+                    self.held_components(false).len();
+                self.inspection_times.push_back((now, c1_in_system));
+                component 
             },
             None => {
                 log!("Inspector1 has no more components to inspect");
@@ -230,6 +243,11 @@ impl Inspector for Inspector1 {
         c.finish_inspecting(now);
         self.held_component = Some(c);
     }
+
+    fn inspection_times(&mut self) -> 
+        (&mut VecDeque<(TimeStamp, usize)>, &mut VecDeque<TimeStamp>) {
+        (&mut self.inspection_times, &mut self.departure_times)
+    }
 }
 
 pub struct Inspector2 {
@@ -241,7 +259,9 @@ pub struct Inspector2 {
     next_finish_time: Option<(Component, TimeStamp)>,
     is_blocked: bool,
     random: Random,
-    blocked_times: Vec<TimeStamp>
+    blocked_times: Vec<TimeStamp>,
+    inspection_times: VecDeque<(TimeStamp, usize)>,
+    departure_times: VecDeque<TimeStamp>
 }
 
 impl Inspector2 {
@@ -258,7 +278,9 @@ impl Inspector2 {
             next_finish_time: None,
             is_blocked: true,
             random: Random::new(),
-            blocked_times: vec!()
+            blocked_times: vec!(),
+            inspection_times: vec!().into(),
+            departure_times: vec!().into()
         }
     }
 
@@ -272,28 +294,28 @@ impl Inspector2 {
 
         if self.durations_c2.len() == 0 && self.durations_c3.len() != 0 {
             return Some(
-                Component::C3(self.durations_c3.pop_front().unwrap(), None, None));
+                Component::new(self.durations_c3.pop_front().unwrap(), 3));
         } else if self.durations_c2.len() != 0 && self.durations_c3.len() == 0 {
             return Some(
-                Component::C2(self.durations_c2.pop_front().unwrap(), None, None));
+                Component::new(self.durations_c2.pop_front().unwrap(), 2));
         } else if self.durations_c2.len() != 0 && self.durations_c3.len() != 0 {
 
         
             let c2_count = self.ws[0].borrow()
-                .matching_count(Component::C2(Duration::never(), None, None));
+                .matching_count(Component::new(Duration::never(), 2));
             let c3_count = self.ws[1].borrow()
-                .matching_count(Component::C3(Duration::never(), None, None));
+                .matching_count(Component::new(Duration::never(), 3));
 
          
             if c2_count == 2 &&  c3_count != 2 && !self.held_c3.is_some()  {
-                return Some(Component::C3(
+                return Some(Component::new(
                         self.durations_c3.pop_front().unwrap(), 
-                        None, None));   
+                        3));   
             } else if c3_count == 2 && c2_count != 2 && !self.held_c2.is_some() {
                 return Some(
-                    Component::C2(
+                    Component::new(
                         self.durations_c2.pop_front().unwrap(), 
-                        None, None));
+                       2));
             } else if c3_count == 2  && c2_count == 2 {
                 return None;
             }
@@ -301,13 +323,13 @@ impl Inspector2 {
             log!("Inspector 2 picking next random component {c2_count} {c3_count}");
             return match self.random.boolean() {
                 true => Some(
-                    Component::C3(
+                    Component::new(
                         self.durations_c3.pop_front().unwrap(), 
-                        None, None)),
+                        3)),
                 false => Some(
-                    Component::C2(
+                    Component::new(
                         self.durations_c2.pop_front().unwrap(), 
-                        None, None))
+                        2))
             } 
         }
         None
@@ -370,7 +392,14 @@ impl Inspector for Inspector2 {
                         self.held_c3 = Some(component);
                     }
                 }
-                self.inspection_times.push((now, component));
+                let components_in_system_now = 
+                    self.ws[0].borrow_mut().matching_count(
+                            Component::new(Duration::never(), 2)) +
+                    self.ws[1].borrow_mut().matching_count(
+                            Component::new(Duration::never(), 3)) +
+                    self.held_components(false).len();
+                self.inspection_times.push_back((now, components_in_system_now));
+                println!("qqqq {:?}", self.inspection_times.front());
                 Some(component)
             },
             None => {
@@ -452,8 +481,12 @@ impl Inspector for Inspector2 {
             None => "".to_string()
         };
 
-
         format!("[{}, {}]", s1, s2)
+    }
+
+    fn inspection_times(&mut self) -> 
+        (&mut VecDeque<(TimeStamp, usize)>, &mut VecDeque<TimeStamp>) {
+        (&mut self.inspection_times, &mut self.departure_times)
     }
 }
 

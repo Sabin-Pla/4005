@@ -4,25 +4,37 @@ use crate::simulation::{Duration, TimeStamp};
 // components have an inspection duration
 #[derive(Copy, Clone, Debug)]
 pub enum Component {
-    C1(Duration, Option<TimeStamp>, Option<TimeStamp>),
-    C2(Duration, Option<TimeStamp>, Option<TimeStamp>),
-    C3(Duration, Option<TimeStamp>, Option<TimeStamp>)
+    C1(Duration, Option<TimeStamp>, Option<TimeStamp>,  Option<TimeStamp>),
+    C2(Duration, Option<TimeStamp>, Option<TimeStamp>,  Option<TimeStamp>),
+    C3(Duration, Option<TimeStamp>, Option<TimeStamp>,  Option<TimeStamp>)
 }
 
 impl Component {
-    fn mut_fields(&mut self) -> (Duration, &mut Option<TimeStamp>, &mut Option<TimeStamp>) {
-        match self {
-            Self::C1(dur,  start,  end) => (*dur, start, end), 
-            Self::C2(dur,  start,  end) => (*dur, start, end), 
-            Self::C3(dur,  start,  end) => (*dur, start, end), 
+
+    pub fn new(duration: Duration, number: usize) -> Self {
+        match number {
+            1 => Self::C1(duration, None, None, None),
+            2 => Self::C2(duration, None, None, None),
+            3 => Self::C3(duration, None, None, None),
+            _ => panic!("no such Component: {number}")
         }
     }
 
-    fn fields(&self) -> (Duration, Option<TimeStamp>, Option<TimeStamp>) {
+    fn mut_fields(&mut self) -> (Duration, 
+            &mut Option<TimeStamp>, &mut Option<TimeStamp>, &mut Option<TimeStamp>) {
         match self {
-            Self::C1(dur,  start,  end) => (*dur, *start, *end), 
-            Self::C2(dur,  start,  end) => (*dur, *start, *end), 
-            Self::C3(dur,  start,  end) => (*dur, *start, *end), 
+            Self::C1(dur,  start,  end, queue_time) => (*dur, start, end, queue_time), 
+            Self::C2(dur,  start,  end, queue_time) => (*dur, start, end, queue_time), 
+            Self::C3(dur,  start,  end, queue_time) => (*dur, start, end, queue_time), 
+        }
+    }
+
+    fn fields(&self) -> (Duration, Option<TimeStamp>, Option<TimeStamp>,
+            Option<TimeStamp>) {
+        match self {
+            Self::C1(dur,  start,  end, queue_time) => (*dur, *start, *end, *queue_time), 
+            Self::C2(dur,  start,  end, queue_time) => (*dur, *start, *end, *queue_time), 
+            Self::C3(dur,  start,  end, queue_time) => (*dur, *start, *end, *queue_time), 
         }
     }
 
@@ -30,7 +42,7 @@ impl Component {
         self.fields().0
     }
 
-    pub fn inspection_start_time(&mut self) -> TimeStamp {
+    pub fn inspection_start_time(&self) -> TimeStamp {
         self.fields().1
             .expect(format!("inspection start time called on unstarted {}", self.name()).as_str())
         
@@ -55,6 +67,12 @@ impl Component {
         *f.2 = Some(now);
     }
 
+    pub fn set_enqueued(&mut self, now: TimeStamp) {
+        let f = self.mut_fields();
+        assert!(matches!(*f.2, Some(_)), "Component was never finished."); 
+        *f.3 = Some(now);
+    }
+
     pub fn name(&self) -> &str{
         match self {
             Self::C1(..) => "C1",
@@ -69,6 +87,10 @@ impl Component {
 
     pub fn is_finished(&self) -> bool {
         self.fields().2.is_some()
+    }
+
+    pub fn enqueue_time(&self) -> TimeStamp {
+        self.fields().3.expect("Component was never enqueued!") 
     }
 }
 

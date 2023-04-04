@@ -4,9 +4,9 @@ use crate::Duration;
 
 #[derive(Copy, Clone, Debug)]
 pub enum Product {
-    P1(Component, TimeStamp, TimeStamp), // C1
-    P2(Component, Component, TimeStamp TimeStamp), // C1, C2
-    P3(Component, Component, TimeStamp, TimeStamp)  // C1, C3
+    P1(Component, TimeStamp), // C1
+    P2(Component, Component, TimeStamp), // C1, C2
+    P3(Component, Component, TimeStamp)  // C1, C3
 }
 
 impl Product {
@@ -58,19 +58,31 @@ impl Product {
     }
 
     pub fn wait_time(&self, component: Component) -> Duration {
-        let pick = |c1: &Component, other_c: &Component, ts| {
-            match component == *c1 {
-                true =>  ts - c1.inspection_end_time(), 
-                false => ts - other_c.inspection_end_time()
+        let pick = |c1, other_c: Component, ts| {
+            match component == c1 {
+                true =>  ts - c1.enqueue_time(), 
+                false => ts - other_c.enqueue_time()
             }
         };
 
         match self {
-            Self::P1(c1, ts) => *ts - c1.inspection_end_time(),
-            Self::P2(c1, c2, ts) => pick(c1, c2, *ts),
-            Self::P3(c1, c3, ts) => pick(c1, c3, *ts)
+            Self::P1(c1, ts) => *ts - c1.enqueue_time(),
+            Self::P2(c1, c2, ts) => pick(*c1, *c2, *ts),
+            Self::P3(c1, c3, ts) => pick(*c1, *c3, *ts)
         }
     }   
+
+    pub fn time_components_in_system(&self) -> Duration {
+        match self {
+            Self::P1(c1, ts) => *ts - c1.inspection_start_time(),
+            Self::P2(c1, c2, ts) => 
+                (*ts - c1.inspection_start_time()) + 
+                (*ts - c2.inspection_start_time()),
+            Self::P3(c1, c3, ts) => 
+                (*ts - c1.inspection_start_time()) + 
+                (*ts - c3.inspection_start_time()),
+        }
+    }
 
     pub fn name(&self) -> &str {
         match self {

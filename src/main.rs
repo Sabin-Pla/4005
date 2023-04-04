@@ -197,7 +197,19 @@ fn buffer_stats(ws: Rc<RefCell<Workstation>>,
     let ws = ws.borrow();
 
     let count_in_ws = |component: Component, w: WSType| {
+        //println!("{} {}", w, w.matching_count(component));
         w.matching_count(component) as f64
+    };
+
+    let count_arrival = |component: Component, w: &[(TimeStamp,WSType)]| {
+        let c1 = count_in_ws(component, w[0].1);
+        let c2 = count_in_ws(component, w[1].1);
+        // match if the number of components between state 2 and 1
+        // increased (i.e, if there was an arrival)
+        match c1 < c2 {
+            true => (c2 - c1) as f64,
+            false => 0.0
+        }
     };
 
     let occupancy = (1.0/total_time) * ws.buffer_states
@@ -210,16 +222,19 @@ fn buffer_stats(ws: Rc<RefCell<Workstation>>,
 
     log!("L = average {component} occupancy of {} {:.2}", 
         ws.name(), occupancy);
-    let throughput = ws.products.len() as f64 / total_time;
-    log!("λ = {component} buffer throughput  of {} {:.2}", 
-        ws.name(), throughput);
-    let waiting_time = (1.0 / ws.products.len() as f64) * ws.products
+    let arrival_rate = (1.0 / total_time) * ws.buffer_states
+        .as_slice()
+        .windows(2)
+        .fold(0.0, |acc, w| acc + count_arrival(component, w) );
+    log!("λ = {component} buffer entry throughput  of {} {:.5}", ws.name(), arrival_rate);
+    let wait_time = (1.0 / ws.products.len() as f64) * ws.products
         .iter()
         .fold(Duration::none(), 
             |acc, product| acc + product.wait_time(component));
     log!("W = average {component} wait time of {} {:.2}", 
-        ws.name(), waiting_time);
-    log!("(should be close to 0) L - λW = {:.2}", occupancy - throughput * waiting_time.as_minutes());
+        ws.name(), wait_time);
+    log!("L - λW = {:.5}",
+        occupancy - arrival_rate * wait_time.as_minutes());
     occupancy
 }
 
@@ -270,6 +285,82 @@ fn inspector_stats(ins: &dyn Inspector, total_time: f64) -> f64 {
             |acc, w| acc + add_next_slice(w)).as_minutes() / total_time
 }
 
+fn combine_inspection_times(
+    inspection_times: [&mut VecDeque<(TimeStamp, usize)>; 2],
+    v: &mut Vec<(TimeStamp, usize)>,
+    total_time: f64) {
+
+    let (mut b1, mut  b2) = (0, 0);
+    let mut t = (0.0, 0);
+
+    while t.0 < total_time {
+        let mut choose_min = || {
+            let mut drain_remaining = |i: usize, b_other| -> bool {
+                if inspection_times[i].len() == 0 {
+                    while let Some((t, occ)) = inspection_times[(i + 1) % 2].pop_front() {
+                        v.push((t, occ + b_other))
+                    }
+                    return true
+                }
+                false
+            };
+
+            if drain_remaining(0, b2) || drain_remaining(1, b1) {
+                return None
+            }
+
+            match inspection_times[0][0].0 < inspection_times[1][0].0 {
+                true => Some((inspection_times[0][0].0, 0)),
+                false => Some((inspection_times[1][0].0, 1))
+            }
+        };
+       
+        if let Some((t_next, idx)) = choose_min() {
+            b1 = inspection_times[0][0].1;
+            b2 = inspection_times[1][0].1;
+            v.push((t_next, b1 + b2));
+            t.0 = (t_next - TimeStamp::start()).as_minutes();
+            inspection_times[idx].pop_front();
+        } else {
+            println!("{:#.2?}", v);
+            return;
+        }
+    }
+}
+
+fn littles_law_whole_system(
+    inspection_times: [&mut VecDeque<TimeStamp>; 2],
+    exit_times: [&mut VecDeque<TimeStamp>; 2],
+    products: [&Vec<Product>; 3],
+    total_time: f64) {
+
+    let arrival_rate = (inspection_times[0].len() + 
+        inspection_times[1].len()) as f64 / total_time;
+    let wait_time: f64 = (1.0 / total_time) * products.into_iter().flatten()
+        .fold(Duration::none(), 
+            |acc, p| acc + p.time_components_in_system()).as_minutes();
+    let mut v = vec!();
+    combine_inspection_times(inspection_times, &mut v, total_time);
+   // inspection_times[0].append(&mut inspection_times[1].clone());
+    // combine the of the inspection times for both inspectors and sort them
+    let mut inspection_times = v;
+
+    let occupancy = (1.0 / total_time) * inspection_times
+        .as_slice()
+        .windows(2)
+        .fold(0.0, |acc, w| acc + w[0].1 as f64 * (w[1].0 - w[0].0).as_minutes());
+
+    let v = [inspection_times, exit_times].to_vec().into_iter().flatten();
+    
+
+    log!("\nLittles law (Whole System)");
+    log!("average occupancy (L) : {:.2}", occupancy);
+    log!("arrival rate      (λ) : {:.2}", arrival_rate);
+    log!("waiting_time      (W) : {:.2}", wait_time);
+    log!("              L-λW    : {:.2}", 
+        occupancy - arrival_rate * wait_time);
+}
+
 
 fn run_iteration() -> [Vec<f64>; 4] {
 
@@ -318,15 +409,15 @@ fn run_iteration() -> [Vec<f64>; 4] {
     // calculate stats for all 5 buffers
     let buffer_stats = [
         buffer_stats(ws1.clone(), 
-            Component::C1(Duration::never(), None, None), total_time),
+            Component::new(Duration::never(), 1), total_time),
         buffer_stats(ws2.clone(), 
-            Component::C1(Duration::never(), None, None), total_time),
+            Component::new(Duration::never(), 1), total_time),
         buffer_stats(ws2.clone(), 
-            Component::C2(Duration::never(), None, None), total_time),
+            Component::new(Duration::never(), 2), total_time),
         buffer_stats(ws3.clone(), 
-            Component::C1(Duration::never(), None, None), total_time),
+            Component::new(Duration::never(),1), total_time),
         buffer_stats(ws3.clone(), 
-            Component::C3(Duration::never(), None, None), total_time)];
+            Component::new(Duration::never(), 3), total_time)];
     log!("Average buffer occupancies: {:.2?}", buffer_stats);
     // calculate stats for each WS
     let ws_stats = [
@@ -346,6 +437,12 @@ fn run_iteration() -> [Vec<f64>; 4] {
         inspector_stats(&inspector2, total_time)];
     log!("Inspector blocked rate [Ins1, Ins2] {:.2?}", inspector_stats);
     
+    let ins1 = inspector1.inspection_times();
+    let ins2 = inspector2.inspection_times();
+    littles_law_whole_system(
+        [ins1.0,ins2.0],
+        [&ws1.borrow().products, &ws2.borrow().products, &ws3.borrow().products],
+        total_time);
     [buffer_stats.to_vec(), ws_stats.to_vec(),
         product_stats.to_vec(), inspector_stats.to_vec()]
 }
@@ -393,7 +490,7 @@ fn main() {
         }
 
         if !(calculated_r.iter().any(|cr| *cr as f64 > r as f64)) {
-            println!("Determined R of {r}\n{:#?}", &calculated_r);
+            println!("\nConverged on replication count (R) of {r}");
             n = r;
             break;
         }

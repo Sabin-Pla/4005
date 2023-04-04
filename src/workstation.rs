@@ -83,6 +83,7 @@ impl Type {
     } 
 
     pub fn matching_count(&self, component: Component) -> usize {
+
         match component {
             Component::C1(..) => self.c1_in_waiting(),
             _ =>  {
@@ -193,9 +194,10 @@ impl Workstation {
             c: Component, now: TimeStamp) -> EnqueueResult {
         assert!(c.is_finished(), "{} {}", ins1, c);
 
-        let add_to_buffer = |buf: &mut Buffer, c| {
+        let add_to_buffer = |buf: &mut Buffer, mut c: Component| {
             // put c in next available slot in buffer 
             // buffer cannot be full
+            c.set_enqueued(now);
             if !buf[1].is_none() {
                 return (false, *buf);
             }
@@ -219,10 +221,12 @@ impl Workstation {
             Type::W2(buf_c1, buf_c2) => decide_buffer(buf_c1, buf_c2, c),
             Type::W3(buf_c1, buf_c3) => decide_buffer(buf_c1, buf_c3, c),
         };
-        self.buffer_states.push((now, self.ws_type));
         match result {
-            true => EnqueueResult::CouldEnqueue(ins1, 
-                c, self.ws_type, now, self.is_working()),
+            true => {
+                self.buffer_states.push((now, self.ws_type));
+                EnqueueResult::CouldEnqueue(ins1, 
+                    c, self.ws_type, now, self.is_working())
+            },
             false => EnqueueResult::Fail
         }
     }
