@@ -1,40 +1,67 @@
-use std::fmt::{Display, Formatter, Result};
 use crate::simulation::{Duration, TimeStamp};
+use std::fmt::{Display, Formatter, Result};
 
-// components have an inspection duration
+// components have an inspection duration,
+// inspect start time, inspect end time, enqueue time
 #[derive(Copy, Clone, Debug)]
 pub enum Component {
-    C1(Duration, Option<TimeStamp>, Option<TimeStamp>,  Option<TimeStamp>),
-    C2(Duration, Option<TimeStamp>, Option<TimeStamp>,  Option<TimeStamp>),
-    C3(Duration, Option<TimeStamp>, Option<TimeStamp>,  Option<TimeStamp>)
+    C1(
+        Duration,
+        Option<TimeStamp>,
+        Option<TimeStamp>,
+        Option<TimeStamp>,
+    ),
+    C2(
+        Duration,
+        Option<TimeStamp>,
+        Option<TimeStamp>,
+        Option<TimeStamp>,
+    ),
+    C3(
+        Duration,
+        Option<TimeStamp>,
+        Option<TimeStamp>,
+        Option<TimeStamp>,
+    ),
 }
 
 impl Component {
-
     pub fn new(duration: Duration, number: usize) -> Self {
         match number {
             1 => Self::C1(duration, None, None, None),
             2 => Self::C2(duration, None, None, None),
             3 => Self::C3(duration, None, None, None),
-            _ => panic!("no such Component: {number}")
+            _ => panic!("no such Component: {number}"),
         }
     }
 
-    fn mut_fields(&mut self) -> (Duration, 
-            &mut Option<TimeStamp>, &mut Option<TimeStamp>, &mut Option<TimeStamp>) {
+    fn mut_fields(
+        &mut self,
+    ) -> (
+        Duration,
+        &mut Option<TimeStamp>,
+        &mut Option<TimeStamp>,
+        &mut Option<TimeStamp>,
+    ) {
         match self {
-            Self::C1(dur,  start,  end, queue_time) => (*dur, start, end, queue_time), 
-            Self::C2(dur,  start,  end, queue_time) => (*dur, start, end, queue_time), 
-            Self::C3(dur,  start,  end, queue_time) => (*dur, start, end, queue_time), 
+            Self::C1(dur, start, end, queue_time) => (*dur, start, end, queue_time),
+            Self::C2(dur, start, end, queue_time) => (*dur, start, end, queue_time),
+            Self::C3(dur, start, end, queue_time) => (*dur, start, end, queue_time),
         }
     }
 
-    fn fields(&self) -> (Duration, Option<TimeStamp>, Option<TimeStamp>,
-            Option<TimeStamp>) {
+    fn fields(
+        &self,
+    ) -> (
+        Duration,
+        Option<TimeStamp>,
+        Option<TimeStamp>,
+        Option<TimeStamp>,
+    ) {
         match self {
-            Self::C1(dur,  start,  end, queue_time) => (*dur, *start, *end, *queue_time), 
-            Self::C2(dur,  start,  end, queue_time) => (*dur, *start, *end, *queue_time), 
-            Self::C3(dur,  start,  end, queue_time) => (*dur, *start, *end, *queue_time), 
+            Self::C1(dur, start, end, queue_time) => (*dur, *start, *end, *queue_time),
+            Self::C2(dur, start, end, queue_time) => (*dur, *start, *end, *queue_time),
+            Self::C3(dur, start, end, queue_time) => (*dur, *start, *end, *queue_time),
         }
     }
 
@@ -43,13 +70,14 @@ impl Component {
     }
 
     pub fn inspection_start_time(&self) -> TimeStamp {
-        self.fields().1
+        self.fields()
+            .1
             .expect(format!("inspection start time called on unstarted {}", self.name()).as_str())
-        
     }
 
     pub fn inspection_end_time(&self) -> TimeStamp {
-        self.fields().2
+        self.fields()
+            .2
             .expect(format!("inspection end time called on unfinished {}", self.name()).as_str())
     }
 
@@ -59,25 +87,27 @@ impl Component {
 
     pub fn finish_inspecting(&mut self, now: TimeStamp) {
         let f = self.mut_fields();
-        assert!(matches!(*f.2, None), "Component already finished."); 
+        assert!(matches!(*f.2, None), "Component already finished.");
         let dif = f.1.unwrap() + f.0 - now;
-        assert!(dif.as_minutes() <=  1000.0 * f64::EPSILON, 
-            "{} floating point arithmetic error threshold exceeded", dif.as_minutes()
+        assert!(
+            dif.as_minutes() <= 1000.0 * f64::EPSILON,
+            "{} floating point arithmetic error threshold exceeded",
+            dif.as_minutes()
         );
         *f.2 = Some(now);
     }
 
     pub fn set_enqueued(&mut self, now: TimeStamp) {
         let f = self.mut_fields();
-        assert!(matches!(*f.2, Some(_)), "Component was never finished."); 
+        assert!(matches!(*f.2, Some(_)), "Component was never finished.");
         *f.3 = Some(now);
     }
 
-    pub fn name(&self) -> &str{
+    pub fn name(&self) -> &str {
         match self {
             Self::C1(..) => "C1",
             Self::C2(..) => "C2",
-            Self::C3(..) => "C3"
+            Self::C3(..) => "C3",
         }
     }
 
@@ -90,7 +120,7 @@ impl Component {
     }
 
     pub fn enqueue_time(&self) -> TimeStamp {
-        self.fields().3.expect("Component was never enqueued!") 
+        self.fields().3.expect("Component was never enqueued!")
     }
 }
 
